@@ -30,11 +30,17 @@ actor FastVLMUnityRunner {
     private var currentTask: Task<String, Error>?
 
     init() {
+        #if canImport(FastVLM)
         FastVLM.register(modelFactory: VLMModelFactory.shared)
+        #endif
         setDefaultModelDirectory()
     }
 
     func configure(modelDirectoryPath: String) {
+        if case .loading(let task) = loadState {
+            task.cancel()
+        }
+
         if modelDirectoryPath.isEmpty {
             setDefaultModelDirectory()
         } else {
@@ -156,6 +162,7 @@ actor FastVLMUnityRunner {
     }
 
     private func setDefaultModelDirectory() {
+        #if canImport(FastVLM)
         let bundle = Bundle(for: FastVLM.self)
         let defaultDirectory = bundle
             .url(forResource: "config", withExtension: "json")?
@@ -169,6 +176,10 @@ actor FastVLMUnityRunner {
             modelDirectoryURL = nil
             modelConfiguration = nil
         }
+        #else
+        modelDirectoryURL = nil
+        modelConfiguration = nil
+        #endif
     }
 }
 

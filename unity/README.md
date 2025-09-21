@@ -148,6 +148,8 @@ public class FastVLMWebCamExample : MonoBehaviour
 - `FastVLMUnity.SetCancelOnNewRequest(bool)` controls whether a new request cancels any in-flight inference (enabled by default).
 - `FastVLMUnity.ProcessRawBytesAsync(...)` provides direct access if you already manage pixel buffers.
 - `FastVLMUnity.CancelAll()` aborts the active inference and clears any pending callbacks.
+- `FastVLMUnity.Configure(string)` resets the native runner. It cancels any in-flight inference and outstanding load requests, forcing the next `LoadModelAsync` call to reload the container with the new directory.
+- Inference helpers complete with `TaskCanceledException` when a request is cancelled (either explicitly via `CancelAll` or implicitly through `SetCancelOnNewRequest(true)`). Wrap awaits in `try/catch` to handle this case gracefully.
 
 ## Notes & limitations
 

@@ -29,6 +29,7 @@ namespace Apple.FastVLM.Unity
     {
 #if UNITY_IOS && !UNITY_EDITOR
         private const string DllName = "__Internal";
+        private const string CancellationMessage = "The FastVLM request was cancelled.";
 
         private delegate void ResultCallback(int requestId, IntPtr result, IntPtr error);
         private delegate void StatusCallback(IntPtr error);
@@ -81,6 +82,21 @@ namespace Apple.FastVLM.Unity
         /// </summary>
         public static void Configure(string modelDirectory)
         {
+            TaskCompletionSource<bool>? pendingLoad = null;
+
+            lock (LoadLock)
+            {
+                _modelLoaded = false;
+
+                if (_loadTask != null)
+                {
+                    pendingLoad = _loadTask;
+                    _loadTask = null;
+                }
+            }
+
+            pendingLoad?.TrySetCanceled();
+
             FastVLMUnity_Configure(modelDirectory ?? string.Empty);
         }
 
@@ -122,7 +138,7 @@ namespace Apple.FastVLM.Unity
                     return _loadTask.Task;
                 }
 
-                _loadTask = new TaskCompletionSource<bool>();
+                _loadTask = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             }
 
             FastVLMUnity_LoadModel(OnLoadCompleted);
@@ -255,7 +271,7 @@ namespace Apple.FastVLM.Unity
             bool flipVertical)
         {
             int requestId = Interlocked.Increment(ref _nextRequestId);
-            var tcs = new TaskCompletionSource<string>();
+            var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             lock (PendingRequestsLock)
             {
@@ -310,7 +326,14 @@ namespace Apple.FastVLM.Unity
 
             if (!string.IsNullOrEmpty(error))
             {
-                tcs.TrySetException(new InvalidOperationException(error));
+                if (string.Equals(error, CancellationMessage, StringComparison.Ordinal))
+                {
+                    tcs.TrySetCanceled();
+                }
+                else
+                {
+                    tcs.TrySetException(new InvalidOperationException(error));
+                }
             }
             else if (result != null)
             {
@@ -336,10 +359,12 @@ namespace Apple.FastVLM.Unity
             lock (LoadLock)
             {
                 tcs = _loadTask;
-                if (string.IsNullOrEmpty(error))
+
+                if (tcs != null)
                 {
-                    _modelLoaded = true;
+                    _modelLoaded = string.IsNullOrEmpty(error);
                 }
+
                 _loadTask = null;
             }
 
