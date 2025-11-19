@@ -37,8 +37,21 @@ actor FastVLMUnityRunner {
             setDefaultModelDirectory()
         } else {
             let url = URL(fileURLWithPath: modelDirectoryPath, isDirectory: true)
-            modelDirectoryURL = url
-            modelConfiguration = ModelConfiguration(directory: url)
+            
+            // Validate that directory exists and is readable
+            var isDirectory: ObjCBool = false
+            if !FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) {
+                print("[FastVLM] Warning: Model directory does not exist at \(url.path)")
+                modelDirectoryURL = nil
+                modelConfiguration = nil
+            } else if !isDirectory.boolValue {
+                print("[FastVLM] Warning: Model path is not a directory: \(url.path)")
+                modelDirectoryURL = nil
+                modelConfiguration = nil
+            } else {
+                modelDirectoryURL = url
+                modelConfiguration = ModelConfiguration(directory: url)
+            }
         }
 
         loadState = .idle
@@ -155,19 +168,26 @@ actor FastVLMUnityRunner {
 
     private func setDefaultModelDirectory() {
         let bundle = Bundle(for: FastVLM.self)
-        let defaultDirectory = bundle
-            .url(forResource: "config", withExtension: "json")?
+        guard let configPath = bundle.url(forResource: "config", withExtension: "json") else {
+            print("[FastVLM] Warning: Bundled model config.json not found")
+            print("[FastVLM] Call FastVLMUnity.Configure(path) with a valid model directory path")
+            modelDirectoryURL = nil
+            modelConfiguration = nil
+            return
+        }
+
+        let defaultDirectory = configPath
             .resolvingSymlinksInPath()
             .deletingLastPathComponent()
 
-        if let defaultDirectory {
-            modelDirectoryURL = defaultDirectory
-            modelConfiguration = ModelConfiguration(directory: defaultDirectory)
-        } else {
-            modelDirectoryURL = nil
-            modelConfiguration = nil
-        }
+        modelDirectoryURL = defaultDirectory
+        modelConfiguration = ModelConfiguration(directory: defaultDirectory)
     }
 }
 
+// MARK: - Thread Safety
+// LoadState conforms to Sendable with @unchecked because it must be safely shared
+// across actor boundaries. The actor isolation ensures that all state mutations
+// occur serially on the actor's isolated context. Task objects are inherently
+// Sendable in Swift 5.10+, making this conformance safe.
 extension FastVLMUnityRunner.LoadState: @unchecked Sendable {}

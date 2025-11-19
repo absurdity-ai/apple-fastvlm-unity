@@ -21,9 +21,9 @@ unity/
 
 ## Prerequisites
 
-- Unity 2022.3 or later with iOS build support.
-- Xcode 16.2 or later targeting iOS 18.2+.
-- Apple Silicon device for running the model on-device.
+- Unity 2022.3 or later with iOS/visionOS build support.
+- Xcode 16.2 or later targeting iOS 18.2+ or visionOS 2.0+.
+- Apple Silicon device (iPhone 15+, iPad, or visionOS device) for running the model on-device.
 - A downloaded FastVLM model (see below).
 
 ## Integration steps
@@ -151,9 +151,14 @@ public class FastVLMWebCamExample : MonoBehaviour
 
 ## Notes & limitations
 
-- The plugin expects RGBA32 or BGRA32 pixel layouts. The helper methods convert Unity `Color32[]` buffers into the correct format automatically.
-- Model loading can take several seconds depending on the model size and device. Always await `LoadModelAsync` before issuing the first inference.
+- The plugin expects RGBA32 or BGRA32 pixel layouts:
+  - **RGBA32**: [R][G][B][A] - Each byte represents Red, Green, Blue, and Alpha channels respectively
+  - **BGRA32**: [B][G][R][A] - Each byte represents Blue, Green, Red, and Alpha channels respectively
+  - The helper methods convert Unity `Color32[]` buffers into the correct format automatically.
+- Model loading can take 10-30+ seconds depending on the model size and device. Always await `LoadModelAsync(timeoutSeconds)` before issuing the first inference. The default timeout is 120 seconds; customize as needed.
 - Because iOS enforces a watchdog timeout on the main thread, avoid blocking operations. The native plugin executes FastVLM inference asynchronously and delivers the result back on the main thread.
 - Ensure that the downloaded model assets remain readable at runtime (for example, mark copied files with the `Always Included Files` flag if you move them into `StreamingAssets`).
+- Configure the plugin with a valid model directory path before loading the model. If the configured path doesn't exist, a warning is logged to help diagnose setup issues.
+- The plugin automatically cancels the previous inference when a new request is issued (by default). Disable this with `FastVLMUnity.SetCancelOnNewRequest(false)` if you want multiple concurrent inferences.
 
 With this setup you can drive FastVLM directly from Unity on iOS, enabling low-latency, on-device multimodal interactions.

@@ -7,6 +7,13 @@ import CoreGraphics
 import CoreImage
 import Foundation
 
+/// Supported pixel formats for image processing.
+/// 
+/// - `rgba32`: Red-Green-Blue-Alpha, 32-bit per pixel
+///   Byte order: [R][G][B][A]
+/// 
+/// - `bgra32`: Blue-Green-Red-Alpha, 32-bit per pixel
+///   Byte order: [B][G][R][A]
 @objc enum FastVLMUnityColorFormat: Int {
     case rgba32 = 0
     case bgra32 = 1
@@ -45,8 +52,8 @@ struct FastVLMUnityImageConverter {
             info.insert(.byteOrder32Big)
             bitmapInfo = info
         case .bgra32:
-            var info = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue)
-            info.insert(.byteOrder32Little)
+            var info = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+            info.insert(.byteOrder32Big)
             bitmapInfo = info
         }
 

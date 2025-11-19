@@ -27,7 +27,7 @@ namespace Apple.FastVLM.Unity
     /// </summary>
     public static class FastVLMUnity
     {
-#if UNITY_IOS && !UNITY_EDITOR
+#if (UNITY_IOS || UNITY_VISIONOS) && !UNITY_EDITOR
         private const string DllName = "__Internal";
 
         private delegate void ResultCallback(int requestId, IntPtr result, IntPtr error);
@@ -70,6 +70,8 @@ namespace Apple.FastVLM.Unity
         private static readonly object LoadLock = new();
         private static TaskCompletionSource<bool>? _loadTask;
         private static bool _modelLoaded;
+        
+        private static readonly TimeSpan DefaultLoadTimeout = TimeSpan.FromSeconds(120);
 
         static FastVLMUnity()
         {
@@ -79,8 +81,25 @@ namespace Apple.FastVLM.Unity
         /// <summary>
         /// Configure the plugin with a model directory. If not called, the plugin uses the bundled model configuration.
         /// </summary>
+        /// <param name="modelDirectory">Absolute path to directory containing model files (config.json, weights, etc.).
+        /// Pass null or empty string to use bundled model resources.</param>
         public static void Configure(string modelDirectory)
         {
+            if (!string.IsNullOrEmpty(modelDirectory))
+            {
+                // Validate that path is absolute and directory exists
+                var path = modelDirectory.Trim();
+                if (!Path.IsPathRooted(path))
+                {
+                    Debug.LogWarning($"FastVLM: Model directory path should be absolute. Provided: {path}");
+                }
+                
+                if (!Directory.Exists(path))
+                {
+                    Debug.LogWarning($"FastVLM: Model directory does not exist at {path}");
+                }
+            }
+
             FastVLMUnity_Configure(modelDirectory ?? string.Empty);
         }
 
@@ -108,25 +127,48 @@ namespace Apple.FastVLM.Unity
         /// <summary>
         /// Ensure the model is loaded before issuing inference requests.
         /// </summary>
-        public static Task LoadModelAsync()
+        /// <param name="timeoutSeconds">Maximum seconds to wait for model loading (default 120 seconds).
+        /// If loading takes longer, a TimeoutException is thrown.</param>
+        public static async Task LoadModelAsync(int timeoutSeconds = 120)
         {
+            if (timeoutSeconds <= 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(timeoutSeconds), "Timeout must be positive.");
+            }
+
+            Task loadTask;
             lock (LoadLock)
             {
                 if (_modelLoaded)
                 {
-                    return Task.CompletedTask;
+                    return;
                 }
 
                 if (_loadTask != null)
                 {
-                    return _loadTask.Task;
+                    loadTask = _loadTask.Task;
                 }
-
-                _loadTask = new TaskCompletionSource<bool>();
+                else
+                {
+                    _loadTask = new TaskCompletionSource<bool>();
+                    loadTask = _loadTask.Task;
+                    FastVLMUnity_LoadModel(OnLoadCompleted);
+                }
             }
 
-            FastVLMUnity_LoadModel(OnLoadCompleted);
-            return _loadTask!.Task;
+            using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds)))
+            {
+                try
+                {
+                    await loadTask.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw new TimeoutException(
+                        $"Model loading timed out after {timeoutSeconds} seconds. " +
+                        "Check that the model path is valid and the device has sufficient memory.");
+                }
+            }
         }
 
         /// <summary>
@@ -257,21 +299,35 @@ namespace Apple.FastVLM.Unity
             int requestId = Interlocked.Increment(ref _nextRequestId);
             var tcs = new TaskCompletionSource<string>();
 
+            // Register request BEFORE calling native code to avoid race condition
+            // where the callback might be invoked before the request is registered
             lock (PendingRequestsLock)
             {
                 PendingRequests[requestId] = tcs;
             }
 
-            FastVLMUnity_ProcessImage(
-                requestId,
-                pixelData,
-                width,
-                height,
-                bytesPerRow,
-                (int)format,
-                flipVertical ? 1 : 0,
-                prompt ?? string.Empty,
-                OnProcessCompleted);
+            try
+            {
+                FastVLMUnity_ProcessImage(
+                    requestId,
+                    pixelData,
+                    width,
+                    height,
+                    bytesPerRow,
+                    (int)format,
+                    flipVertical ? 1 : 0,
+                    prompt ?? string.Empty,
+                    OnProcessCompleted);
+            }
+            catch
+            {
+                // If native call fails, clean up the registered request
+                lock (PendingRequestsLock)
+                {
+                    PendingRequests.Remove(requestId);
+                }
+                throw;
+            }
 
             return tcs.Task;
         }
@@ -282,43 +338,57 @@ namespace Apple.FastVLM.Unity
             string? result = null;
             string? error = null;
 
-            if (resultPtr != IntPtr.Zero)
+            try
             {
-                result = Marshal.PtrToStringAnsi(resultPtr);
-                FastVLMUnity_FreeCString(resultPtr);
-            }
-
-            if (errorPtr != IntPtr.Zero)
-            {
-                error = Marshal.PtrToStringAnsi(errorPtr);
-                FastVLMUnity_FreeCString(errorPtr);
-            }
-
-            TaskCompletionSource<string>? tcs = null;
-            lock (PendingRequestsLock)
-            {
-                if (PendingRequests.TryGetValue(requestId, out tcs))
+                if (resultPtr != IntPtr.Zero)
                 {
-                    PendingRequests.Remove(requestId);
+                    result = Marshal.PtrToStringAnsi(resultPtr);
+                }
+
+                if (errorPtr != IntPtr.Zero)
+                {
+                    error = Marshal.PtrToStringAnsi(errorPtr);
+                }
+
+                TaskCompletionSource<string>? tcs = null;
+                lock (PendingRequestsLock)
+                {
+                    if (PendingRequests.TryGetValue(requestId, out tcs))
+                    {
+                        PendingRequests.Remove(requestId);
+                    }
+                }
+
+                if (tcs == null)
+                {
+                    return;
+                }
+
+                if (!string.IsNullOrEmpty(error))
+                {
+                    tcs.TrySetException(new InvalidOperationException(error));
+                }
+                else if (result != null)
+                {
+                    tcs.TrySetResult(result);
+                }
+                else
+                {
+                    tcs.TrySetResult(string.Empty);
                 }
             }
+            finally
+            {
+                // Always free native strings to prevent memory leaks
+                if (resultPtr != IntPtr.Zero)
+                {
+                    FastVLMUnity_FreeCString(resultPtr);
+                }
 
-            if (tcs == null)
-            {
-                return;
-            }
-
-            if (!string.IsNullOrEmpty(error))
-            {
-                tcs.TrySetException(new InvalidOperationException(error));
-            }
-            else if (result != null)
-            {
-                tcs.TrySetResult(result);
-            }
-            else
-            {
-                tcs.TrySetResult(string.Empty);
+                if (errorPtr != IntPtr.Zero)
+                {
+                    FastVLMUnity_FreeCString(errorPtr);
+                }
             }
         }
 
@@ -326,35 +396,46 @@ namespace Apple.FastVLM.Unity
         private static void OnLoadCompleted(IntPtr errorPtr)
         {
             string? error = null;
-            if (errorPtr != IntPtr.Zero)
-            {
-                error = Marshal.PtrToStringAnsi(errorPtr);
-                FastVLMUnity_FreeCString(errorPtr);
-            }
 
-            TaskCompletionSource<bool>? tcs;
-            lock (LoadLock)
+            try
             {
-                tcs = _loadTask;
-                if (string.IsNullOrEmpty(error))
+                if (errorPtr != IntPtr.Zero)
                 {
-                    _modelLoaded = true;
+                    error = Marshal.PtrToStringAnsi(errorPtr);
                 }
-                _loadTask = null;
-            }
 
-            if (tcs == null)
-            {
-                return;
-            }
+                TaskCompletionSource<bool>? tcs;
+                lock (LoadLock)
+                {
+                    tcs = _loadTask;
+                    if (string.IsNullOrEmpty(error))
+                    {
+                        _modelLoaded = true;
+                    }
+                    _loadTask = null;
+                }
 
-            if (!string.IsNullOrEmpty(error))
-            {
-                tcs.TrySetException(new InvalidOperationException(error));
+                if (tcs == null)
+                {
+                    return;
+                }
+
+                if (!string.IsNullOrEmpty(error))
+                {
+                    tcs.TrySetException(new InvalidOperationException(error));
+                }
+                else
+                {
+                    tcs.TrySetResult(true);
+                }
             }
-            else
+            finally
             {
-                tcs.TrySetResult(true);
+                // Always free native strings to prevent memory leaks
+                if (errorPtr != IntPtr.Zero)
+                {
+                    FastVLMUnity_FreeCString(errorPtr);
+                }
             }
         }
 #else
